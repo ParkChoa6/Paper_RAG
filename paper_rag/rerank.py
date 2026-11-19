@@ -183,7 +183,21 @@ def _load_model(model_name: str, device: str, max_length: int):
         "加载重排模型 %s（device=%s, max_length=%d）—— 第一次会下载约 2.3GB",
         model_name, device, max_length,
     )
-    model = CrossEncoder(model_name, device=device, max_length=max_length)
+    # ★ 关掉加载权重时的 `Loading weights: 100%|████████|` 进度条（2026-11-19）。
+    #
+    #   transformers 加载权重默认打一条 tqdm，它会出现在
+    #   uvicorn 的日志里（一行 \r 刷到底，把前后的日志挤乱）。
+    #   predict 那边的进度条已经用 show_progress_bar=False 关掉了，
+    #   这一条是【加载】侧的，同一个毛病、不同的开关。
+    #
+    #   ⚠️ 这是【全局】状态，所以用 try/finally 还原 —— 不能因为
+    #      "我们这里不想看"，就把调用方进程里所有的进度条都永久关掉。
+    from transformers.utils import logging as hf_logging
+    hf_logging.disable_progress_bar()
+    try:
+        model = CrossEncoder(model_name, device=device, max_length=max_length)
+    finally:
+        hf_logging.enable_progress_bar()
     _MODEL_CACHE[key] = model
     logger.info("重排模型 %s 已就绪（本进程内后续复用）", model_name)
     return model
@@ -342,7 +356,13 @@ class CrossEncoderReranker:
         #   我们在 CPU 上跑，padding 是实打实要算的 —— 实测 32 比 4 慢 81%。
         #   ★ 它【不改分数】：predict 是逐对打分，批大小不参与任何数学。
         #     实测 max|Δ分| = 4e-7（float32 舍入），三个查询的【全序】完全一致。
-        scores = model.predict(pairs, batch_size=self.batch_size)
+        #
+        # ★ show_progress_bar=False：sentence-transformers 6.x 默认【开】进度条，
+        #   它会往 stdout 打一行行 \r（"Batches: 46%|████▌     |"）。
+        #   ① 评测日志里它把 28 行结果糊成一条；② 服务端它直接进 uvicorn 的日志。
+        #   和 batch_size 一样：这是【显示开关】，不改任何分数。
+        scores = model.predict(pairs, batch_size=self.batch_size,
+                               show_progress_bar=False)
 
         ranked = [(cid, float(s)) for (cid, _), s in zip(candidates, scores)]
         ranked.sort(key=lambda x: x[1], reverse=True)

@@ -17,23 +17,15 @@
 
 import logging
 
-import ollama
-
-from paper_rag.config import OLLAMA_HOST
+# ★ make_client 已经搬到 paper_rag/ollama_client.py（2026-11-19）。
+#   这里【再导出】一次是故意的，让 `from paper_rag.llm import make_client`
+#   的老脚本原样能用。理由和来龙去脉见文件末尾。
+#
+#   （`import ollama` 和 `OLLAMA_HOST` 随之不再需要：这个文件只管
+#     "怎么生成"，不管"怎么连"。）
+from paper_rag.ollama_client import make_client  # noqa: F401  re-export
 
 logger = logging.getLogger(__name__)
-
-
-def make_client() -> ollama.Client:
-    """建一个 Ollama 客户端。
-
-    返回:
-        ollama.Client，指向 config.OLLAMA_HOST
-
-    注意:
-        embed.py 里有一个【一模一样】的函数。这是故意的，理由见文件末尾。
-    """
-    return ollama.Client(host=OLLAMA_HOST)
 
 
 def generate(
@@ -79,22 +71,28 @@ def generate(
 
 
 # ---------------------------------------------------------------------------
-# 关于 make_client 的两份拷贝
+# 关于 make_client：曾经有两份拷贝，2026-11-19 抽掉了
 #
-# 你可能想说：DRY —— 重复的代码该抽出去。
+# 【当时的决定】embed.py 和 llm.py 各写一份 `ollama.Client(host=...)`。
+#   理由：只有一行，抽到独立模块是"为一行代码多一个文件"；
+#        抽到 embed.py 又会让 llm 假依赖 embed。
+#        结论是先重复，等第三处出现再抽。
 #
-# 但抽到哪？
-#   抽到 embed.py，让 llm.py 去 import 它？
-#       → llm 就【假依赖】了 embed。生成压根不关心向量的事。
-#         而且 embed 依赖 ollama，llm 依赖 embed，链条白长一节。
-#   抽到独立的 client.py？
-#       → 为了一行 `ollama.Client(host=...)` 多一个模块。
-#         模块本身也是负债：多一个文件、多一次 import、多一个要维护的名字。
+# 【现在改了】不是因为第三处出现了，而是因为那行代码长出了【条件】：
+#   OLLAMA_HOST 是本机时必须 trust_env=False（本机两个进程之间不该先经过
+#   系统代理那个第三方进程），是远程时必须 trust_env=True（代理可能正是它连得过去的原因）。
 #
-# 现在的选择是：【先重复，等第三处出现再抽】。
-# 如果 Stage 6 造 Agent 的时候又要第三份，那一刻再抽 —— 那时你才知道
-# 它到底该住哪、该长什么样。
+#   判据换了：
+#     旧判据 —— 「重复了几次」
+#     新判据 —— 「两份不同步的时候，有没有东西会报错」
 #
-# 这不是懒，是【推迟一个信息不足的决定】。
-# 现在抽，你是在猜；等第三处出现，你是在看。
+#   旧的一行：不同步只是写法丑，行为一样。可以等。
+#   新的带条件的逻辑：不同步 = 一份绕代理、一份不绕。
+#     ★ 而且这个不同步是【静默】的 —— 实测两条路的耗时差不多
+#       （中位 14.1ms vs 13.1ms，重测三遍都在这附近），
+#       所以少写一份不会慢到让人察觉，只会悄悄多一个会吐 502 的中间人。
+#     ★ 这才是"重复到该抽"的真正信号：不是长度，是【出错时不会喊】。
+#
+# 现在 :paper_rag/ollama_client.py 一处定义，两个模块各自 re-export。
+# 十几个脚本里的 `from paper_rag.embed import make_client` 一个字没改。
 # ---------------------------------------------------------------------------

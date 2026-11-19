@@ -375,3 +375,119 @@ def verify(parsed: dict, chunks: list[dict]) -> list[str]:
             problems.append(f"引用 [{n}]：原文中找不到对应内容（疑似伪造）")
 
     return problems
+
+
+# ── 编号修正（S5-11）────────────────────────────────────────────────────
+#
+# S5-8 把「编号错配」从「疑似伪造」里拆了出来，但只做到【报准病名】。
+# 8 个实例稳定复现（Q8/Q13/Q17/Q23…），说明这不是偶发 —— 是模型的一种固定行为：
+# 它抄对了原文，却把这份原文贴到了另一个编号上。
+#
+# ── 为什么这件事【能】由代码做，而且比让模型重做更稳 ──
+#
+#   编号不是证据，原文才是。
+#   quotes 里那句英文原句是模型从材料里抄出来的（S5-8 已经量过：684 条里
+#   只有 2 条是全库都找不到的真伪造）。既然原句是真的，那它究竟出自哪条材料，
+#   就是一个【可以由代码算出来的量】—— 把这句话拿到本次材料里逐条搜一遍就行。
+#
+#   ★ 让模型"先写句子再贴编号"是 S5-8 §7.4 的方向之一。但那是【求它少犯错】；
+#     这里是【不把可推导的值交给它算】。后者和 "parse_response 不许补值"
+#     是同一条原则的两面：凡是能由代码确定的，别让模型猜。
+#
+# ── 为什么不在 verify 里修 ──
+#
+#   verify 的职责是【报告真伪】，它必须保持"只看证据、不改证据"。
+#   一个既当裁判又当修理工的校验器，改完之后永远报"没问题" ——
+#   你会失去「模型有多爱贴错编号」这个数，而那正是 S5-8 拆病拆出来的东西。
+#   所以：修在 repair_indices，验在 verify，两条路径各自可测。
+#
+# ── 边界（宁可不动，也不猜）──
+#
+#   · 原句在 0 条材料里找到 → 真伪造，不是编号问题，不动；
+#   · 原句在 ≥2 条材料里都能找到 → 有歧义，不动；
+#   · 纠正之后两条引用会撞到同一份材料 → 整批不动（只有一条改对了、
+#     另一条仍错着，比两条都不动更难解释）。
+#   · 拒答（used=[]）时无事可做。
+#
+# ── 修了必须说 ──
+#
+#   返回的第二项是【修了什么】的清单，由 pipeline 原样透传、由评测计数。
+#   静默修 = 把"模型的错"从数据里抹掉，而这正是本项目最忌讳的一种"改对了"。
+
+_MARKER_RE_TEXT = re.compile(r"\[(\d+)\]")
+
+
+def repair_indices(parsed: dict, chunks: list[dict]) -> tuple[dict, list[str]]:
+    """按 quotes 的原文，反查它真正出自哪条材料，改回正确的编号。
+
+    参数、chunks 语义和 verify 完全一致（就是当初喂给模型的那批材料）。
+
+    返回:
+        (新的 parsed, 修正说明清单)
+        没有可修的 → 原对象原样返回，清单为空。
+
+    ⚠️ answer 正文里的 [n] 会【一起改】。只改 quotes 不改正文的话，
+       交付出去的回答仍然指向错的材料 —— 那只是把矛盾藏进了两个字段之间。
+    """
+    used: list[int] = parsed["used"]
+    quotes_by_n: dict[int, str] = {int(k): v for k, v in parsed["quotes"].items()}
+
+    # 拒答、或者模型根本没声称用了任何材料 → 没有"编号"可言。
+    if not used or not quotes_by_n:
+        return parsed, []
+
+    n_chunks = len(chunks)
+    norm_chunks = {m: _norm(render_material(m, chunks[m - 1]))
+                   for m in range(1, n_chunks + 1)}
+
+    # 每一条引用的【正确归属】。唯一确定不了的一律保持原样 ——
+    # 保持原样 = 交给 verify 去报，不是"当它是对的"。
+    target_of: dict[int, int] = {}
+    for n, q in sorted(quotes_by_n.items()):
+        if n < 1 or n > n_chunks:
+            target_of[n] = n
+            continue
+        text = (q or "").strip()
+        norm_quote = _norm(text) if text else ""
+        if not norm_quote or norm_quote in norm_chunks[n]:
+            target_of[n] = n
+            continue
+        hits = [m for m in range(1, n_chunks + 1) if norm_quote in norm_chunks[m]]
+        target_of[n] = hits[0] if len(hits) == 1 else n
+
+    changed = {n: m for n, m in target_of.items() if m != n}
+    if not changed:
+        return parsed, []
+
+    # 纠正后必须仍是一一对应。两条引用指到同一份材料 = 至少有一条没纠正对，
+    # 那就不再是"按原文反查"，而是"猜"。
+    #
+    # ★ 这里【不】往 repairs 里塞一句"我本来想修但没修"。repairs 的语义是
+    #   「改过了」，塞进去会让 n_repairs 这个数变成两种东西的和 ——
+    #   而"修了 3 处"和"3 处想修没修"在报表上长得一模一样。
+    #   没修的，verify 那边会如实报出来（编号错配），本来就有地方说。
+    if len(set(target_of.values())) != len(target_of):
+        return parsed, []
+
+    new_used: list[int] = []
+    for n in used:
+        m = target_of.get(n, n)
+        if m not in new_used:
+            new_used.append(m)
+
+    new_quotes = {str(target_of.get(int(k), int(k))): v for k, v in quotes_by_n.items()}
+
+    new_answer = _MARKER_RE_TEXT.sub(
+        lambda mo: (f"[{target_of[int(mo.group(1))]}]"
+                    if int(mo.group(1)) in changed else mo.group(0)),
+        parsed.get("answer", ""),
+    )
+
+    repairs = [
+        f"引用 [{n}]：原句实际出自材料 [{m}]，已按原句把编号改成 [{m}]"
+        for n, m in sorted(changed.items())
+    ]
+
+    return {**parsed, "answer": new_answer, "used": new_used,
+            "quotes": new_quotes}, repairs
+

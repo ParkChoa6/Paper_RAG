@@ -42,7 +42,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from paper_rag.cite import verify
+from paper_rag.cite import repair_indices, verify
 from paper_rag.config import EMB_MODEL, PROCESSED_DIR, TOP_K
 from paper_rag.embed import embed_one, make_client
 from paper_rag.generator import build_prompt, parse_response, render_material
@@ -339,6 +339,84 @@ def report(name: str, expect, problems: list[str], note: str, crashed: str | Non
     return good
 
 
+# ── 编号修正的离线关卡（S5-11）──────────────────────────────────────────
+#
+# ★ 同样不调模型：repair_indices 是纯函数，输入输出都能写死。
+#   要命的是这个病在真实运行里只有 8/684 条 —— 想靠"跑一次看看"撞上它，
+#   得跑很多次；而且撞上了也分不清"没修"和"本来就没错"。构造输入才测得准。
+#
+# 每一关看四样东西：used / quotes 的键 / answer 正文 / 修了几处。
+# ★ 正文必须一起看 —— 只查 quotes 的话，"正文还留着旧编号"这种半修状态会被漏掉。
+
+_AMBIG = FAKE + [
+    {"chunk_id": "t#4", "title": FAKE_TITLE, "section": "4.1", "page_start": 7,
+     "text": Q1},          # 和材料 1 一模一样的句子 → 第 1 关里的"歧义"来源
+]
+
+REPAIR_CASES = [
+    ("全部对得上", FAKE,
+     {"answer": "… [1]", "used": [1], "quotes": {"1": Q1}},
+     [1], ["1"], "… [1]", 0, "没事可修的时候不许乱改"),
+
+    ("★ 单条错配", FAKE,
+     {"answer": "答案 [1]", "used": [1], "quotes": {"1": Q3}},
+     [3], ["3"], "答案 [3]", 1, "原句来自材料 3，编号和正文一起改"),
+
+    ("★ 两条互换", FAKE,
+     {"answer": "[1][3]", "used": [1, 3], "quotes": {"1": Q3, "3": Q1}},
+     [3, 1], ["1", "3"], "[3][1]", 2, "同时替换，不能先改一个再改另一个"),
+
+    ("真伪造不动", FAKE,
+     {"answer": "…", "used": [1], "quotes": {"1": "RAG was invented by Google."}},
+     [1], ["1"], "…", 0, "哪儿都找不到 = 编造，不是编号问题"),
+
+    ("原句两处都有 → 不动", _AMBIG,
+     {"answer": "…", "used": [3], "quotes": {"3": Q1}},
+     [3], ["3"], "…", 0, "归属不唯一时宁可不修，交给 verify 报"),
+
+    ("纠正后撞车 → 整批不动", FAKE,
+     {"answer": "…", "used": [1, 2], "quotes": {"1": Q1, "2": Q1}},
+     [1, 2], ["1", "2"], "…", 0, "两条引用指到同一份材料，说明至少一条判错了"),
+
+    ("拒答不动", FAKE,
+     {"answer": "资料未提及", "used": [], "quotes": {}},
+     [], [], "资料未提及", 0, "没有编号可言"),
+
+    ("正文里的 [94] 不动", FAKE,
+     {"answer": "RotatE [94] 把关系建模成旋转 [1]", "used": [1], "quotes": {"1": Q3}},
+     [3], ["3"], "RotatE [94] 把关系建模成旋转 [3]", 1,
+     "只改【被纠正过的】编号；论文里的 [94] 不是材料编号"),
+]
+
+
+def run_repair_offline() -> bool:
+    """跑编号修正的离线关卡，返回【是否全部通过】。"""
+    print(LINE)
+    print("repair_indices 离线测试（构造输入，不调模型）")
+    print(LINE)
+
+    ok = 0
+    for name, chunks, parsed, exp_used, exp_keys, exp_ans, exp_n, note in REPAIR_CASES:
+        try:
+            out, repairs = repair_indices(parsed, chunks)
+            got = (out["used"], sorted(out["quotes"]), out["answer"], len(repairs))
+        except Exception as e:  # noqa: BLE001 —— 探针要看它炸成什么样
+            print(f"  ❌ {name:<22} 炸了   {note}")
+            print(f"       └─ [{type(e).__name__}] {e}")
+            continue
+        want = (exp_used, sorted(exp_keys), exp_ans, exp_n)
+        good = got == want
+        ok += good
+        print(f"  {'✅' if good else '❌'} {name:<22} {note}")
+        if not good:
+            print(f"       └─ 期望 {want}")
+            print(f"          实际 {got}")
+
+    print()
+    print(f"  {ok}/{len(REPAIR_CASES)} 通过")
+    return ok == len(REPAIR_CASES)
+
+
 def run_offline() -> bool:
     """跑离线关卡，返回【是否全部通过】。
 
@@ -609,6 +687,7 @@ def run_experiments() -> None:
 
 def main() -> None:
     offline_ok = run_offline()
+    repair_ok = run_repair_offline()
     stats = run_experiments()
     print()
     print(LINE)
@@ -622,6 +701,8 @@ def main() -> None:
     reasons = []
     if not offline_ok:
         reasons.append("离线关卡没过")
+    if not repair_ok:
+        reasons.append("编号修正的离线关卡没过（S5-11）")
     if stats["aborted"]:
         reasons.append(f"半路中止：{stats['aborted']}")
     if stats["mismatch"]:

@@ -99,6 +99,13 @@ def show(result: dict, quiet: bool) -> None:
     for n, quote in parsed.get("quotes", {}).items():
         print(f"    [{n}] {quote[:90]}")
 
+    # ★ S5-11：模型贴错的编号被代码按原句改回来了。必须让人看见 ——
+    #   不印的话，用户看到的是"一次完美的回答"，而模型这个毛病从此隐形。
+    if result.get("repairs"):
+        print(f"\n  ✱ 编号修正 {len(result['repairs'])} 处（按原文反查，不是猜）：")
+        for r in result["repairs"]:
+            print(f"    - {r}")
+
     if result["problems"]:
         print(f"\n  ⚠️ 引用校验发现 {len(result['problems'])} 个问题：")
         for p in result["problems"]:

@@ -11,9 +11,15 @@
 
 import logging
 
-import ollama
-
-from paper_rag.config import OLLAMA_HOST
+# ★ make_client 已经搬到 paper_rag/ollama_client.py（2026-11-19）。
+#   这里【再导出】一次是故意的：十几个脚本写的是 `from paper_rag.embed import make_client`，
+#   让它们全部原样能用，比改十几个 import 更安全 ——
+#   而"到底怎么连 Ollama"这件事，现在只有一处定义。
+#
+#   （`import ollama` 和 `OLLAMA_HOST` 随之不再需要：这个文件只管
+#     "怎么嵌"，不管"怎么连"。留着一个用不到的 import 会让人以为
+#     连接逻辑还在这里。）
+from paper_rag.ollama_client import make_client  # noqa: F401  re-export
 
 logger = logging.getLogger(__name__)
 
@@ -21,15 +27,6 @@ logger = logging.getLogger(__name__)
 # 不是越大越好：整批 = 一条 HTTP 请求，一条失败整批就失败。
 # 32 是「请求数少」和「失败爆炸半径小」之间的折中。
 BATCH = 32
-
-
-def make_client() -> ollama.Client:
-    """建一个 Ollama 客户端。
-
-    返回:
-        ollama.Client，指向 config.OLLAMA_HOST
-    """
-    return ollama.Client(host=OLLAMA_HOST)
 
 
 def embed_texts(client, model: str, texts: list[str]) -> tuple[list, list[int]]:

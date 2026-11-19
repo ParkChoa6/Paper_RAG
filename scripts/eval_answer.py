@@ -279,6 +279,11 @@ def run_arm(arm: str, retriever, queries, client, chunks, vectors, ids, *,
             "status": r["status"],
             "n_problems": len(r["problems"]),
             "problems": r["problems"],
+            # ★ S5-11：编号被自动改回来的次数。它是【模型犯错的计数】，
+            #   不是"系统更好了"的证据 —— 所以必须单独记一列，
+            #   不能被 problem 数变少这件事顺手吃掉。
+            "n_repairs": len(r.get("repairs") or []),
+            "repairs": r.get("repairs") or [],
             "note": r["note"],
             "answer": (r["parsed"] or {}).get("answer", ""),
             "used": used,
@@ -561,6 +566,9 @@ def write_judge_sheet(rows_by_arm: dict[str, list[dict]], queries: list[dict],
         "- `缺`   —— 拒答，但材料里其实有答案（该答没答）",
         "- `拒`   —— 拒答，且材料里确实没有答案（拒得对）",
         "- `编`   —— 材料里没有，模型却给了答案（幻觉）",
+        "- `崩`   —— 没交付（parse_failed / 空回答）。★ 不是「拒答」："
+        "拒答是模型按契约选择不说，`崩` 是管线根本没产出。两者都 0 分，"
+        "但一个是判断、一个是故障，**不许合并**（见 S5-10）",
         "",
         "> 判完再打开 `e2e_key.json` 对号入座。",
         "",
@@ -607,7 +615,8 @@ def write_judge_sheet(rows_by_arm: dict[str, list[dict]], queries: list[dict],
             else:
                 bridge = "材料里**没有**答案"
             lines.append(f"**{lab}**（{bridge}｜{row['status']}"
-                         f"{'｜引用有问题' if row['n_problems'] else ''}）")
+                         f"{'｜引用有问题' if row['n_problems'] else ''}"
+                         f"{'｜编号修正' + str(row['n_repairs']) + ' 处' if row.get('n_repairs') else ''}）")
             lines.append("")
             ans = row["answer"].strip() or "（空）"
             lines.append(f"> {ans}")

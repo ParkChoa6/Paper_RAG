@@ -57,7 +57,9 @@ Stage 3 的拒答和 Stage 4 的引用校验，在换语料之后一次都没跑
     pipeline.py    ↑ 以上全部串起来       ← 本文件，只做编排，不含新逻辑
 """
 
-from paper_rag.cite import verify
+import time
+
+from paper_rag.cite import repair_indices, verify
 from paper_rag.config import (
     EMB_MODEL,
     EXPANSIONS,
@@ -277,8 +279,12 @@ def ask(
                                 #   「没换」在输出里长得一模一样 ——
                                 #   和当年不打印论文标题是同一个病。
           "retrieved":  [{"chunk": {...}, "score": float}, ...],
-          "parsed":     dict | None,   # 模型输出；解析失败时为 None
+          "parsed":     dict | None,   # 模型输出（编号修正之后）；解析失败时为 None
           "problems":   [str, ...],    # cite.verify 的问题清单，空 = 通过
+          "repairs":    [str, ...],    # ★ S5-11：自动改回来的编号，空 = 没改过。
+                                       #   修了必须能看见 —— 静默修等于把模型的错从数据里抹掉
+          "timings":    {"expand": float, "retrieve": float, "generate": float,
+                         "verify": float, "total": float},   # ★ Stage 8：秒
           "status":     "answered" | "refused" | "suspect" | "parse_failed",
           "note":       str | None,    # suspect / parse_failed 时的解释
         }
@@ -305,7 +311,10 @@ def ask(
            是两个完全不同的 status，不允许合并。
     """
     # ── ① 扩写 ──
+    t_start = time.perf_counter()
+    t_mark = time.perf_counter()
     query = expand_query(question) if expand else question
+    timings = {"expand": round(time.perf_counter() - t_mark, 3)}
 
     # ── ② + ③ 向量化 + 检索 ──
     # 用 emb_model 而不是 gen_model —— 这是两个完全不同的模型，
@@ -328,6 +337,7 @@ def ask(
     if retriever is None:
         retriever = build_retriever(client, emb_model, vectors, ids, chunks, k=k)
 
+    t_mark = time.perf_counter()
     hits = retriever.search(query, k=k)
 
     # ── ④ chunk_id → chunk 字典 ──
@@ -347,12 +357,21 @@ def ask(
 
     materials = [r["chunk"] for r in retrieved]
 
+    # ★ 2026-11-19（Stage 8）：把四段耗时分别记下来。
+    #   一次问答 13 秒，其中 10.6 秒在重排 —— 这个数字以前只活在评测脚本里。
+    #   没有它，界面层只能说"有点慢"，说不出"慢在哪"。
+    #   ⚠️ 这是【观测】，不是判断：它不改变任何一条 status。
+    timings["retrieve"] = round(time.perf_counter() - t_mark, 3)
+
     # ── ⑤ 生成 ──
+    t_mark = time.perf_counter()
     try:
         parsed = answer(client, question, materials, model=gen_model,
                         options=options, schema=gen_schema)
     except Exception as e:
         # 不抛。但也不许悄悄降级成拒答 —— 见 _judge 的说明。
+        timings["generate"] = round(time.perf_counter() - t_mark, 3)
+        timings["total"] = round(time.perf_counter() - t_start, 3)
         return {
             "question": question,
             "query": query,
@@ -361,15 +380,28 @@ def ask(
             "retrieved": retrieved,
             "parsed": None,
             "problems": [],
+            "repairs": [],
+            "timings": timings,
             "status": "parse_failed",
             "note": f"{type(e).__name__}: {e}",
         }
 
     # ── ⑥ 校验引用 ──
+    t_gen_end = time.perf_counter()
     # 拒答时模型没交引用，没什么可核的 —— 直接跳过，
     # 因为 answer() 的契约保证了「拒答 ⇒ used=[]」，而 used=[] 时 verify 无事可做。
+    #
+    # ★ 2026-11-19（S5-11）：校验之前先做一次【编号修正】。
+    #   模型抄对了原文、贴错了编号 —— 原文是真的，那"它出自哪条材料"就是
+    #   一个能算出来的量（见 cite.repair_indices）。修了什么会原样带出去，
+    #   不静默。verify 拿到的是【修完之后】的引用，所以它报的每一条
+    #   都真的是它自己判定的问题，而不是模型标号手滑。
+    parsed, repairs = repair_indices(parsed, materials)
     status, note = _judge(parsed)
     problems = verify(parsed, materials) if status == "answered" else []
+    timings["generate"] = round(t_gen_end - t_mark, 3)
+    timings["verify"] = round(time.perf_counter() - t_gen_end, 3)
+    timings["total"] = round(time.perf_counter() - t_start, 3)
 
     return {
         "question": question,
@@ -379,6 +411,8 @@ def ask(
         "retrieved": retrieved,
         "parsed": parsed,
         "problems": problems,
+        "repairs": repairs,
+        "timings": timings,
         "status": status,
         "note": note,
     }

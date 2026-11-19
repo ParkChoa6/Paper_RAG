@@ -56,3 +56,18 @@ sentence-transformers==6.1.0
 #
 # 删这行之前先读上面四条 —— 现在删掉是对的，但要连同这条注释一起删。
 faiss-cpu==1.15.1
+
+
+# ── Stage 8：把这条线接到浏览器上 ──
+#
+# ★ 这三个包【不进 paper_rag/】。产品代码到现在为止不 import 任何一个
+#   HTTP / UI 库，所以「换掉 FastAPI」和「换掉 Streamlit」都不会动到检索与生成。
+#   把它们写在这里是**显式的**：这是外壳的依赖，不是系统的依赖。
+#
+# httpx 其实会被 ollama 顺带装上（0.28.1）。这里仍然显式写 ——
+# 因为 service/ui.py 直接 import 它，而"我用别人的依赖树里的东西"正是
+# 本文件开头反对的那种写法。★ 自己 import 的，自己声明。
+fastapi==0.118.3      # 后端路由（service/api.py）—— 0.118.2 在 aliyun 镜像上没打中，装到的是 .3
+uvicorn==0.38.0       # ASGI 服务器
+streamlit==1.52.2     # 前端界面（service/ui.py）—— 1.52.0 在 aliyun 镜像上没打中，装到的是 .2
+httpx==0.28.1         # 前端调后端用的 HTTP 客户端
